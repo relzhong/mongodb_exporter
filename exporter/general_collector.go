@@ -28,9 +28,10 @@ import (
 // This collector is always enabled and it is not directly related to any particular MongoDB
 // command to gather stats.
 type generalCollector struct {
-	ctx    context.Context
-	client *mongo.Client
-	logger *logrus.Logger
+	ctx          context.Context
+	client       *mongo.Client
+	logger       *logrus.Logger
+	topologyInfo labelsGetter
 }
 
 func (d *generalCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -38,10 +39,10 @@ func (d *generalCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (d *generalCollector) Collect(ch chan<- prometheus.Metric) {
-	ch <- mongodbUpMetric(d.ctx, d.client, d.logger)
+	ch <- mongodbUpMetric(d.ctx, d.client, d.logger, d.topologyInfo)
 }
 
-func mongodbUpMetric(ctx context.Context, client *mongo.Client, log *logrus.Logger) prometheus.Metric {
+func mongodbUpMetric(ctx context.Context, client *mongo.Client, log *logrus.Logger, topologyInfo labelsGetter) prometheus.Metric {
 	var value float64
 
 	if err := client.Ping(ctx, readpref.PrimaryPreferred()); err == nil {
@@ -50,9 +51,16 @@ func mongodbUpMetric(ctx context.Context, client *mongo.Client, log *logrus.Logg
 		log.Errorf("error while checking mongodb connection: %s. mongo_up is set to 0", err)
 	}
 
-	d := prometheus.NewDesc("mongodb_up", "Whether MongoDB is up.", nil, nil)
+	lk := []string{}
+	lv := []string{}
+	for k, v := range topologyInfo.baseLabels() {
+		lk = append(lk, k)
+		lv = append(lv, v)
+	}
 
-	return prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value)
+	d := prometheus.NewDesc("mongodb_up", "Whether MongoDB is up.", lk, nil)
+
+	return prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value, lv...)
 }
 
 var _ prometheus.Collector = (*generalCollector)(nil)

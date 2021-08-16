@@ -61,13 +61,21 @@ func (d *diagnosticDataCollector) Collect(ch chan<- prometheus.Metric) {
 	d.logger.Debug("getDiagnosticData result")
 	debugResult(d.logger, m)
 
+	ln := make([]string, 0, len(d.topologyInfo.baseLabels()))
+	lv := make([]string, 0, len(d.topologyInfo.baseLabels()))
+
+	for k, v := range d.topologyInfo.baseLabels() {
+		ln = append(ln, k)
+		lv = append(lv, v)
+	}
+
 	metrics := makeMetrics("", m, d.topologyInfo.baseLabels(), d.compatibleMode)
-	metrics = append(metrics, locksMetrics(m)...)
+	metrics = append(metrics, locksMetrics(m, d.topologyInfo.baseLabels())...)
 
 	if d.compatibleMode {
-		metrics = append(metrics, specialMetrics(d.ctx, d.client, m, d.logger)...)
+		metrics = append(metrics, specialMetrics(d.ctx, d.client, m, d.logger, d.topologyInfo.baseLabels())...)
 
-		if cem, err := cacheEvictedTotalMetric(m); err == nil {
+		if cem, err := cacheEvictedTotalMetric(m, ln, lv); err == nil {
 			metrics = append(metrics, cem)
 		}
 

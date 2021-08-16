@@ -51,6 +51,8 @@ type GlobalFlags struct {
 	DiscoveringMode bool `name:"discovering-mode" help:"Enable autodiscover collections"`
 	CompatibleMode  bool `name:"compatible-mode" help:"Enable old mongodb-exporter compatible metrics"`
 	Version         bool `name:"version" help:"Show version and exit"`
+
+	BroadcastMode bool `name:"broadcast-mode" help:"Enable clear mode, with auto discover cluster support"`
 }
 
 func main() {
@@ -117,6 +119,12 @@ func buildExporter(opts GlobalFlags) (*exporter.Exporter, error) {
 		DisableDiagnosticData:   opts.DisableDiagnosticData,
 		DisableReplicasetStatus: opts.DisableReplicasetStatus,
 		DirectConnect:           opts.DirectConnect,
+		BroadcastMode:           opts.BroadcastMode,
+	}
+
+	// broadcast mode should work with globalconnpool
+	if exporterOpts.BroadcastMode && !exporterOpts.GlobalConnPool {
+		return nil, fmt.Errorf("broadcast mode should work with global connpool!")
 	}
 
 	e, err := exporter.New(exporterOpts)

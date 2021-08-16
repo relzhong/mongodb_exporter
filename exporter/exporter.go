@@ -20,12 +20,20 @@ package exporter
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/percona/exporter_shared"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/common/log"
 	"github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -34,10 +42,14 @@ import (
 type Exporter struct {
 	path             string
 	client           *mongo.Client
+	mongosClient     map[string]*mongo.Client
+	shardClient      map[string]*mongo.Client
 	logger           *logrus.Logger
 	opts             *Opts
 	webListenAddress string
 	topologyInfo     labelsGetter
+	topologyInfos    map[string]labelsGetter
+	refreshMutex     *sync.Mutex
 }
 
 // Opts holds new exporter options.
@@ -54,12 +66,77 @@ type Opts struct {
 	Logger                  *logrus.Logger
 	DisableDiagnosticData   bool
 	DisableReplicasetStatus bool
+	BroadcastMode           bool
 }
 
 var (
 	errCannotHandleType   = fmt.Errorf("don't know how to handle data type")
 	errUnexpectedDataType = fmt.Errorf("unexpected data type")
 )
+
+func refreshMongos(exp *Exporter) error {
+	ctx := context.Background()
+	mongosUrl, err := url.Parse(exp.opts.URI)
+	if err != nil {
+		return err
+	}
+	mongosAddrs, err := net.LookupHost(mongosUrl.Hostname())
+	if err != nil {
+		return err
+	}
+
+	if len(mongosAddrs) == 0 {
+		return fmt.Errorf("mongos address no resolve")
+	}
+
+	// delete all dead client
+	exp.refreshMutex.Lock()
+	for k := range exp.mongosClient {
+		find := false
+		for _, addr := range mongosAddrs {
+			addrUrl := strings.Replace(exp.opts.URI, mongosUrl.Hostname(), addr, -1)
+			if addrUrl == k {
+				find = true
+				break
+			}
+		}
+		if !find {
+			err = exp.mongosClient[k].Disconnect(ctx)
+			if err != nil {
+				log.Error(err)
+			}
+			log.Debug("delete mongos addr:", k)
+			delete(exp.mongosClient, k)
+			delete(exp.topologyInfos, k)
+		}
+	}
+	exp.refreshMutex.Unlock()
+
+	// collect all mongos client
+	for _, addr := range mongosAddrs {
+		addrUrl := strings.Replace(exp.opts.URI, mongosUrl.Hostname(), addr, -1)
+		log.Info("mongos addr:", addr)
+		if exp.mongosClient[addrUrl] != nil {
+			continue
+		}
+		client, err := connect(ctx, addrUrl, exp.opts.DirectConnect)
+		if err != nil {
+			return err
+		}
+		exp.mongosClient[addrUrl] = client
+		topologyInfo := &topologyInfo{
+			client: client,
+			labels: map[string]string{
+				"cl_id": addr,
+			},
+		}
+		if err != nil {
+			return err
+		}
+		exp.topologyInfos[addrUrl] = topologyInfo
+	}
+	return nil
+}
 
 // New connects to the database and returns a new Exporter instance.
 func New(opts *Opts) (*Exporter, error) {
@@ -78,18 +155,96 @@ func New(opts *Opts) (*Exporter, error) {
 		logger:           opts.Logger,
 		opts:             opts,
 		webListenAddress: opts.WebListenAddress,
+		refreshMutex:     new(sync.Mutex),
 	}
 	if opts.GlobalConnPool {
 		var err error
-		exp.client, err = connect(ctx, opts.URI, opts.DirectConnect)
-		if err != nil {
-			return nil, err
+		if opts.BroadcastMode {
+			exp.mongosClient = make(map[string]*mongo.Client)
+			exp.shardClient = make(map[string]*mongo.Client)
+			exp.topologyInfos = map[string]labelsGetter{}
+
+			var connectAddr string
+
+			mongosUrl, err := url.Parse(exp.opts.URI)
+			if err != nil {
+				return nil, err
+			}
+
+			err = refreshMongos(exp)
+
+			if err != nil {
+				return nil, err
+			}
+
+			for k := range exp.mongosClient {
+				connectAddr = k
+			}
+
+			if connectAddr == "" {
+				return nil, fmt.Errorf("no connect addr")
+			}
+
+			// add go routin check mongos status
+			go (func(ctx context.Context, exp *Exporter) error {
+				for {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(1 * time.Minute):
+						// refresh mongos
+						err := refreshMongos(exp)
+						if err != nil {
+							log.Error(err)
+						}
+					}
+				}
+			})(ctx, exp)
+
+			var result bson.M
+			// collect all shard client
+			err = exp.mongosClient[connectAddr].Database("admin").RunCommand(ctx, bson.D{{Key: "getShardMap", Value: "1"}}).Decode(&result)
+			if err != nil {
+				return nil, err
+			}
+			re := regexp.MustCompile(`rs\d$`)
+
+			replicateMap, ok := result["map"].(bson.M)
+			if !ok {
+				return nil, fmt.Errorf("getShardMap fail")
+			}
+			for k, v := range replicateMap {
+				if re.MatchString(k) {
+					addStr := v.(string)
+					addStr = strings.Replace(addStr, k+"/", "", -1)
+					addrUrlInfo := mongosUrl
+					addrUrlInfo.Path = "/" + k
+					addrUrlInfo.Host = strings.Replace(addrUrlInfo.Host, addrUrlInfo.Host, addStr, -1)
+					addrUrl := addrUrlInfo.String()
+					log.Info("shard addr:", addStr)
+					client, err := connect(ctx, addrUrl, false)
+					if err != nil {
+						return nil, err
+					}
+					exp.shardClient[addrUrl] = client
+					topologyInfo, err := newTopologyInfo(ctx, client)
+					if err != nil {
+						return nil, err
+					}
+					exp.topologyInfos[addrUrl] = topologyInfo
+				}
+			}
+		} else {
+			exp.client, err = connect(ctx, opts.URI, opts.DirectConnect)
+			if err != nil {
+				return nil, err
+			}
+			exp.topologyInfo, err = newTopologyInfo(ctx, exp.client)
+			if err != nil {
+				return nil, err
+			}
 		}
 
-		exp.topologyInfo, err = newTopologyInfo(ctx, exp.client)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	return exp, nil
@@ -100,9 +255,10 @@ func (e *Exporter) makeRegistry(ctx context.Context, client *mongo.Client, topol
 	registry := prometheus.NewRegistry()
 
 	gc := generalCollector{
-		ctx:    ctx,
-		client: client,
-		logger: e.opts.Logger,
+		ctx:          ctx,
+		client:       client,
+		logger:       e.opts.Logger,
+		topologyInfo: topologyInfo,
 	}
 	registry.MustRegister(&gc)
 
@@ -136,7 +292,7 @@ func (e *Exporter) makeRegistry(ctx context.Context, client *mongo.Client, topol
 		registry.MustRegister(&ic)
 	}
 
-	if !e.opts.DisableDiagnosticData {
+	if !e.opts.DisableDiagnosticData && nodeType != typeMongos {
 		ddc := diagnosticDataCollector{
 			ctx:            ctx,
 			client:         client,
@@ -202,11 +358,23 @@ func (e *Exporter) handler() http.Handler {
 			}
 		}
 
-		registry := e.makeRegistry(ctx, client, topologyInfo)
-
 		gatherers := prometheus.Gatherers{}
 		gatherers = append(gatherers, prometheus.DefaultGatherer)
-		gatherers = append(gatherers, registry)
+		if e.opts.BroadcastMode {
+			for k, v := range e.shardClient {
+				registry := e.makeRegistry(ctx, v, e.topologyInfos[k])
+				gatherers = append(gatherers, registry)
+			}
+			e.refreshMutex.Lock()
+			for k, v := range e.mongosClient {
+				registry := e.makeRegistry(ctx, v, e.topologyInfos[k])
+				gatherers = append(gatherers, registry)
+			}
+			e.refreshMutex.Unlock()
+		} else {
+			registry := e.makeRegistry(ctx, client, topologyInfo)
+			gatherers = append(gatherers, registry)
+		}
 
 		// Delegate http serving to Prometheus client library, which will call collector.Collect.
 		h := promhttp.HandlerFor(gatherers, promhttp.HandlerOpts{

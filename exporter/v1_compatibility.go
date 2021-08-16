@@ -123,14 +123,14 @@ func createOldMetricFromNew(rm *rawMetric, c conversion) *rawMetric {
 		help:   c.oldName,
 		val:    rm.val,
 		vt:     rm.vt,
-		ln:     []string{c.suffixLabel},
-		lv:     []string{suffix},
+		ln:     append([]string{c.suffixLabel}, rm.ln...),
+		lv:     append([]string{suffix}, rm.lv...),
 	}
 
 	return oldMetric
 }
 
-func cacheEvictedTotalMetric(m bson.M) (prometheus.Metric, error) {
+func cacheEvictedTotalMetric(m bson.M, ln []string, lv []string) (prometheus.Metric, error) {
 	s, err := sumMetrics(m, [][]string{
 		{"serverStatus", "wiredTiger", "cache", "modified pages evicted"},
 		{"serverStatus", "wiredTiger", "cache", "unmodified pages evicted"},
@@ -139,8 +139,8 @@ func cacheEvictedTotalMetric(m bson.M) (prometheus.Metric, error) {
 		return nil, err
 	}
 
-	d := prometheus.NewDesc("mongodb_mongod_wiredtiger_cache_evicted_total", "wiredtiger cache evicted total", nil, nil)
-	metric, err := prometheus.NewConstMetric(d, prometheus.GaugeValue, s)
+	d := prometheus.NewDesc("mongodb_mongod_wiredtiger_cache_evicted_total", "wiredtiger cache evicted total", ln, nil)
+	metric, err := prometheus.NewConstMetric(d, prometheus.GaugeValue, s, lv...)
 	if err != nil {
 		return nil, err
 	}
@@ -655,11 +655,16 @@ func lockMetrics() []lockMetric {
 // This function reads the human readable list from lockMetrics() and creates a slice of metrics
 // ready to be exposed, taking the value for each metric from th provided bson.M structure from
 // getDiagnosticData.
-func locksMetrics(m bson.M) []prometheus.Metric {
+func locksMetrics(m bson.M, labels map[string]string) []prometheus.Metric {
 	metrics := lockMetrics()
 	res := make([]prometheus.Metric, 0, len(metrics))
 
 	for _, lm := range metrics {
+		for k, v := range labels {
+			if lm.labels[k] == "" {
+				lm.labels[k] = v
+			}
+		}
 		mm, err := makeLockMetric(m, lm)
 		if mm == nil {
 			continue
@@ -721,8 +726,16 @@ func specialMetricDefinitions() []specialMetric {
 	}
 }
 
-func specialMetrics(ctx context.Context, client *mongo.Client, m bson.M, l *logrus.Logger) []prometheus.Metric {
+func specialMetrics(ctx context.Context, client *mongo.Client, m bson.M, l *logrus.Logger, labels map[string]string) []prometheus.Metric {
 	metrics := make([]prometheus.Metric, 0)
+
+	ln := make([]string, 0, len(labels))
+	lv := make([]string, 0, len(labels))
+
+	for k, v := range labels {
+		ln = append(ln, k)
+		lv = append(lv, v)
+	}
 
 	for _, def := range specialMetricDefinitions() {
 		val, err := sumMetrics(m, def.paths)
@@ -731,8 +744,8 @@ func specialMetrics(ctx context.Context, client *mongo.Client, m bson.M, l *logr
 			continue
 		}
 
-		d := prometheus.NewDesc(def.name, def.help, nil, def.labels)
-		metric, err := prometheus.NewConstMetric(d, prometheus.GaugeValue, val)
+		d := prometheus.NewDesc(def.name, def.help, ln, def.labels)
+		metric, err := prometheus.NewConstMetric(d, prometheus.GaugeValue, val, lv...)
 		if err != nil {
 			l.Errorf("cannot create metric for path: %v: %s", def.paths, err)
 			continue
@@ -741,10 +754,10 @@ func specialMetrics(ctx context.Context, client *mongo.Client, m bson.M, l *logr
 		metrics = append(metrics, metric)
 	}
 
-	metrics = append(metrics, storageEngine(m))
-	metrics = append(metrics, serverVersion(m))
+	metrics = append(metrics, storageEngine(m, ln, lv))
+	metrics = append(metrics, serverVersion(m, ln, lv))
 
-	ms, err := myState(ctx, client)
+	ms, err := myState(ctx, client, ln, lv)
 	if err != nil {
 		l.Debugf("cannot create metric for my state: %s", err)
 	} else {
@@ -755,7 +768,7 @@ func specialMetrics(ctx context.Context, client *mongo.Client, m bson.M, l *logr
 		metrics = append(metrics, mm...)
 	}
 
-	if opLogMetrics, err := oplogStatus(ctx, client); err != nil {
+	if opLogMetrics, err := oplogStatus(ctx, client, ln, lv); err != nil {
 		l.Warnf("cannot create metrics for oplog: %s", err)
 	} else {
 		metrics = append(metrics, opLogMetrics...)
@@ -764,7 +777,7 @@ func specialMetrics(ctx context.Context, client *mongo.Client, m bson.M, l *logr
 	return metrics
 }
 
-func storageEngine(m bson.M) prometheus.Metric {
+func storageEngine(m bson.M, ln []string, lv []string) prometheus.Metric {
 	v := walkTo(m, []string{"serverStatus", "storageEngine", "name"})
 	name := "mongodb_mongod_storage_engine"
 	help := "The storage engine used by the MongoDB instance"
@@ -775,13 +788,13 @@ func storageEngine(m bson.M) prometheus.Metric {
 	}
 	labels := map[string]string{"engine": engine}
 
-	d := prometheus.NewDesc(name, help, nil, labels)
-	metric, _ := prometheus.NewConstMetric(d, prometheus.GaugeValue, float64(1))
+	d := prometheus.NewDesc(name, help, ln, labels)
+	metric, _ := prometheus.NewConstMetric(d, prometheus.GaugeValue, float64(1), lv...)
 
 	return metric
 }
 
-func serverVersion(m bson.M) prometheus.Metric {
+func serverVersion(m bson.M, ln []string, lv []string) prometheus.Metric {
 	v := walkTo(m, []string{"serverStatus", "version"})
 	name := "mongodb_version_info"
 	help := "The server version"
@@ -792,13 +805,13 @@ func serverVersion(m bson.M) prometheus.Metric {
 	}
 	labels := map[string]string{"mongodb": serverVersion}
 
-	d := prometheus.NewDesc(name, help, nil, labels)
-	metric, _ := prometheus.NewConstMetric(d, prometheus.GaugeValue, float64(1))
+	d := prometheus.NewDesc(name, help, ln, labels)
+	metric, _ := prometheus.NewConstMetric(d, prometheus.GaugeValue, float64(1), lv...)
 
 	return metric
 }
 
-func myState(ctx context.Context, client *mongo.Client) (prometheus.Metric, error) {
+func myState(ctx context.Context, client *mongo.Client, ln []string, lv []string) (prometheus.Metric, error) {
 	state, err := util.MyState(ctx, client)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot get my state")
@@ -814,13 +827,13 @@ func myState(ctx context.Context, client *mongo.Client) (prometheus.Metric, erro
 
 	labels := map[string]string{"set": rs.Config.ID}
 
-	d := prometheus.NewDesc(name, help, nil, labels)
-	metric, _ := prometheus.NewConstMetric(d, prometheus.GaugeValue, float64(state))
+	d := prometheus.NewDesc(name, help, ln, labels)
+	metric, _ := prometheus.NewConstMetric(d, prometheus.GaugeValue, float64(state), lv...)
 
 	return metric, nil
 }
 
-func oplogStatus(ctx context.Context, client *mongo.Client) ([]prometheus.Metric, error) {
+func oplogStatus(ctx context.Context, client *mongo.Client, ln []string, lv []string) ([]prometheus.Metric, error) {
 	oplogRS := client.Database("local").Collection("oplog.rs")
 	type oplogRSResult struct {
 		Timestamp primitive.Timestamp `bson:"ts"`
@@ -848,12 +861,12 @@ func oplogStatus(ctx context.Context, client *mongo.Client) ([]prometheus.Metric
 	}
 
 	headDesc := prometheus.NewDesc("mongodb_mongod_replset_oplog_head_timestamp",
-		"The timestamp of the newest change in the oplog", nil, nil)
-	headMetric := prometheus.MustNewConstMetric(headDesc, prometheus.GaugeValue, float64(head.Timestamp.T))
+		"The timestamp of the newest change in the oplog", ln, nil)
+	headMetric := prometheus.MustNewConstMetric(headDesc, prometheus.GaugeValue, float64(head.Timestamp.T), lv...)
 
 	tailDesc := prometheus.NewDesc("mongodb_mongod_replset_oplog_tail_timestamp",
-		"The timestamp of the oldest change in the oplog", nil, nil)
-	tailMetric := prometheus.MustNewConstMetric(tailDesc, prometheus.GaugeValue, float64(tail.Timestamp.T))
+		"The timestamp of the oldest change in the oplog", ln, nil)
+	tailMetric := prometheus.MustNewConstMetric(tailDesc, prometheus.GaugeValue, float64(tail.Timestamp.T), lv...)
 
 	return []prometheus.Metric{headMetric, tailMetric}, nil
 }
