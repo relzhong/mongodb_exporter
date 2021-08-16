@@ -1,6 +1,9 @@
 .PHONY: all build clean default help init test format check-license
 default: help
 
+# Image URL to use all building/pushing image targets
+IMG ?= registry.dev-04-private.7moor.com/private-cloud/mongodb_exporter:1.0.0
+
 GO_TEST_PATH ?= ./...
 GO_TEST_EXTRA ?=
 GO_TEST_COVER_PROFILE ?= cover.out
@@ -107,3 +110,12 @@ test-cluster: env           ## Starts MongoDB test cluster. Use env var TEST_MON
 
 test-cluster-clean: env     ## Stops MongoDB test cluster.
 	docker-compose down
+
+docker-build: ## Build docker image 
+	docker build -t ${IMG} .
+
+docker-push: ## Push docker image 
+	docker push ${IMG}
+
+buildkit-build: ## Build docker image
+	buildctl build --frontend=dockerfile.v0  --local context=. --local dockerfile=. --output type=image,name=${IMG},push=true
