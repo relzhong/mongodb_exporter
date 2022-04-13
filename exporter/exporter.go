@@ -67,6 +67,7 @@ type Opts struct {
 	DisableDiagnosticData   bool
 	DisableReplicasetStatus bool
 	BroadcastMode           bool
+	ShardNamePrefix         string
 }
 
 var (
@@ -207,7 +208,7 @@ func New(opts *Opts) (*Exporter, error) {
 			if err != nil {
 				return nil, err
 			}
-			re := regexp.MustCompile(`rs\d$`)
+			re := regexp.MustCompile(`^` + opts.ShardNamePrefix)
 
 			replicateMap, ok := result["map"].(bson.M)
 			if !ok {
@@ -215,23 +216,25 @@ func New(opts *Opts) (*Exporter, error) {
 			}
 			for k, v := range replicateMap {
 				if re.MatchString(k) {
-					addStr := v.(string)
-					addStr = strings.Replace(addStr, k+"/", "", -1)
-					addrUrlInfo := mongosUrl
-					addrUrlInfo.Path = "/" + k
-					addrUrlInfo.Host = strings.Replace(addrUrlInfo.Host, addrUrlInfo.Host, addStr, -1)
-					addrUrl := addrUrlInfo.String()
-					log.Info("shard addr:", addStr)
-					client, err := connect(ctx, addrUrl, false)
-					if err != nil {
-						return nil, err
+					addsStr := v.(string)
+					addsStr = strings.Replace(addsStr, k+"/", "", -1)
+					for _, addStr := range strings.Split(addsStr, ",") {
+						addrUrlInfo := mongosUrl
+						addrUrlInfo.Path = "/" + k
+						addrUrlInfo.Host = addStr
+						addrUrl := addrUrlInfo.String()
+						log.Info("shard addr:", addStr)
+						client, err := connect(ctx, addrUrl, false)
+						if err != nil {
+							return nil, err
+						}
+						exp.shardClient[addrUrl] = client
+						topologyInfo, err := newTopologyInfo(ctx, client)
+						if err != nil {
+							return nil, err
+						}
+						exp.topologyInfos[addrUrl] = topologyInfo
 					}
-					exp.shardClient[addrUrl] = client
-					topologyInfo, err := newTopologyInfo(ctx, client)
-					if err != nil {
-						return nil, err
-					}
-					exp.topologyInfos[addrUrl] = topologyInfo
 				}
 			}
 		} else {

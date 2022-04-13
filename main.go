@@ -53,6 +53,8 @@ type GlobalFlags struct {
 	Version         bool `name:"version" help:"Show version and exit"`
 
 	BroadcastMode bool `name:"broadcast-mode" help:"Enable clear mode, with auto discover cluster support"`
+
+	ShardNamePrefix string `name:"shardname-prefix" help:"shardname prefix for shard discovery"`
 }
 
 func main() {
@@ -120,6 +122,7 @@ func buildExporter(opts GlobalFlags) (*exporter.Exporter, error) {
 		DisableReplicasetStatus: opts.DisableReplicasetStatus,
 		DirectConnect:           opts.DirectConnect,
 		BroadcastMode:           opts.BroadcastMode,
+		ShardNamePrefix:         opts.ShardNamePrefix,
 	}
 
 	// broadcast mode should work with globalconnpool
