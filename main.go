@@ -55,6 +55,8 @@ type GlobalFlags struct {
 	BroadcastMode bool `name:"broadcast-mode" help:"Enable clear mode, with auto discover cluster support"`
 
 	ShardNamePrefix string `name:"shardname-prefix" help:"shardname prefix for shard discovery"`
+
+	DisableMongosStatus bool `name:"disable.mongos" help:"Disable collecting metrics from mongos"`
 }
 
 func main() {
@@ -123,6 +125,7 @@ func buildExporter(opts GlobalFlags) (*exporter.Exporter, error) {
 		DirectConnect:           opts.DirectConnect,
 		BroadcastMode:           opts.BroadcastMode,
 		ShardNamePrefix:         opts.ShardNamePrefix,
+		DisableMongosStatus:     opts.DisableMongosStatus,
 	}
 
 	// broadcast mode should work with globalconnpool

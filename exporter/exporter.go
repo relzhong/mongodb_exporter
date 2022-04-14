@@ -68,6 +68,7 @@ type Opts struct {
 	DisableReplicasetStatus bool
 	BroadcastMode           bool
 	ShardNamePrefix         string
+	DisableMongosStatus     bool
 }
 
 var (
@@ -128,7 +129,7 @@ func refreshMongos(exp *Exporter) error {
 		topologyInfo := &topologyInfo{
 			client: client,
 			labels: map[string]string{
-				"cl_id": addr,
+				"cid": addr,
 			},
 		}
 		if err != nil {
@@ -217,19 +218,26 @@ func New(opts *Opts) (*Exporter, error) {
 			for k, v := range replicateMap {
 				if re.MatchString(k) {
 					addsStr := v.(string)
+					// skip
+					if k == addsStr {
+						continue
+					}
 					addsStr = strings.Replace(addsStr, k+"/", "", -1)
 					for _, addStr := range strings.Split(addsStr, ",") {
 						addrUrlInfo := mongosUrl
-						addrUrlInfo.Path = "/" + k
+						// addrUrlInfo.Path = "/" + k
 						addrUrlInfo.Host = addStr
 						addrUrl := addrUrlInfo.String()
 						log.Info("shard addr:", addStr)
-						client, err := connect(ctx, addrUrl, false)
+						client, err := connect(ctx, addrUrl, true)
 						if err != nil {
 							return nil, err
 						}
 						exp.shardClient[addrUrl] = client
 						topologyInfo, err := newTopologyInfo(ctx, client)
+
+						topologyInfo.labels["cid"] = addStr
+
 						if err != nil {
 							return nil, err
 						}
@@ -295,13 +303,14 @@ func (e *Exporter) makeRegistry(ctx context.Context, client *mongo.Client, topol
 		registry.MustRegister(&ic)
 	}
 
-	if !e.opts.DisableDiagnosticData && nodeType != typeMongos {
+	if !e.opts.DisableDiagnosticData {
 		ddc := diagnosticDataCollector{
-			ctx:            ctx,
-			client:         client,
-			compatibleMode: e.opts.CompatibleMode,
-			logger:         e.opts.Logger,
-			topologyInfo:   topologyInfo,
+			ctx:                 ctx,
+			client:              client,
+			compatibleMode:      e.opts.CompatibleMode,
+			logger:              e.opts.Logger,
+			topologyInfo:        topologyInfo,
+			disableMongosStatus: e.opts.DisableMongosStatus,
 		}
 		registry.MustRegister(&ddc)
 	}

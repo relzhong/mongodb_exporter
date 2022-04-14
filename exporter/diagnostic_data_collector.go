@@ -27,11 +27,12 @@ import (
 )
 
 type diagnosticDataCollector struct {
-	ctx            context.Context
-	client         *mongo.Client
-	compatibleMode bool
-	logger         *logrus.Logger
-	topologyInfo   labelsGetter
+	ctx                 context.Context
+	client              *mongo.Client
+	compatibleMode      bool
+	disableMongosStatus bool
+	logger              *logrus.Logger
+	topologyInfo        labelsGetter
 }
 
 func (d *diagnosticDataCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -40,6 +41,21 @@ func (d *diagnosticDataCollector) Describe(ch chan<- *prometheus.Desc) {
 
 func (d *diagnosticDataCollector) Collect(ch chan<- prometheus.Metric) {
 	var m bson.M
+
+	if d.compatibleMode {
+		nodeType, err := getNodeType(d.ctx, d.client)
+		if err != nil {
+			d.logger.Errorf("Cannot get node type to check if this is a mongos: %s", err)
+		} else if nodeType == typeMongos && !d.disableMongosStatus {
+			metrics := makeMetrics("", m, d.topologyInfo.baseLabels(), d.compatibleMode)
+			metrics = append(metrics, locksMetrics(m, d.topologyInfo.baseLabels())...)
+			metrics = append(metrics, mongosMetrics(d.ctx, d.client, d.logger)...)
+			for _, metric := range metrics {
+				ch <- metric
+			}
+			return
+		}
+	}
 
 	cmd := bson.D{{Key: "getDiagnosticData", Value: "1"}}
 	res := d.client.Database("admin").RunCommand(d.ctx, cmd)
@@ -77,13 +93,6 @@ func (d *diagnosticDataCollector) Collect(ch chan<- prometheus.Metric) {
 
 		if cem, err := cacheEvictedTotalMetric(m, ln, lv); err == nil {
 			metrics = append(metrics, cem)
-		}
-
-		nodeType, err := getNodeType(d.ctx, d.client)
-		if err != nil {
-			d.logger.Errorf("Cannot get node type to check if this is a mongos: %s", err)
-		} else if nodeType == typeMongos {
-			metrics = append(metrics, mongosMetrics(d.ctx, d.client, d.logger)...)
 		}
 	}
 
